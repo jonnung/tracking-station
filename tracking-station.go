@@ -4,10 +4,13 @@ import (
 	"github.com/gin-gonic/gin"
 	"sync"
 	"log"
+	"github.com/Sirupsen/logrus"
+	"os"
+	"fmt"
 )
 
 const (
-	TRACKING_NEW    = "/job/new"
+	TRACKING_ADD = "/job/new"
 	TRACKING_STATUS = "/job/status"
 	TRACKING_RESULT = "/job/result"
 	WORKER_COUNT = 3
@@ -31,8 +34,10 @@ type Tag struct {
 var requestQueue chan RequestInspector
 var inspectQueue chan TrackingClients
 
+var logAccess *logrus.Logger
+var logError *logrus.Logger
 
-func setupWorker(worker_count int) {
+func setupWorkers(worker_count int) {
 	if worker_count < WORKER_COUNT {
 		worker_count = WORKER_COUNT
 	}
@@ -45,9 +50,10 @@ func setupWorker(worker_count int) {
 
 func startWorker() {
 	for {
-		cl := <-inspectQueue
-		log.Println(cl)
 		var wc sync.WaitGroup
+
+		cl := <-inspectQueue
+
 		for _, tag := range cl.Tags {
 			wc.Add(1)
 			go startSubWorker(tag.Part, tag.Url, &wc)
@@ -74,7 +80,7 @@ func distributionWork() {
 }
 
 
-func newTrackingHandler(c *gin.Context) {
+func addTrackingHandler(c *gin.Context) {
 	var rq RequestInspector
 	if err := c.BindJSON(&rq); err != nil {
 		log.Fatal(err)
@@ -83,16 +89,54 @@ func newTrackingHandler(c *gin.Context) {
 	requestQueue <- rq
 }
 
+func LogMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Next()
+		output := fmt.Sprintf("%s %s %s %s %s",
+			c.Request.Method,
+			c.Request.URL.Path,
+			c.ClientIP(),
+			c.ContentType(),
+			c.Request.Header.Get("User-Agenct"),
+		)
+		logAccess.Info(output)
+	}
+}
+
+func setupLogger() {
+	logAccess = logrus.New()
+	logError = logrus.New()
+
+	logAccess.Formatter = &logrus.TextFormatter{
+		TimestampFormat: "2006-01-02 15:04:05",
+		ForceColors:     false,
+		FullTimestamp:   true,
+	}
+	logError.Formatter = &logrus.TextFormatter{
+		TimestampFormat: "2006-01-02 15:04:05",
+		ForceColors:     false,
+		FullTimestamp:   true,
+	}
+
+	logAccess.Level = logrus.InfoLevel
+	logError.Level = logrus.ErrorLevel
+
+	logAccess.Out, _ = os.OpenFile("log/tracking-station.access.log", os.O_RDWR | os.O_CREATE | os.O_APPEND, 0755)
+	logError.Out, _ = os.OpenFile("log/tracking-station.error.log", os.O_RDWR | os.O_CREATE | os.O_APPEND, 0755)
+}
 
 func main() {
 	router := gin.New()
 
+	router.Use(LogMiddleware())
+
 	requestQueue = make(chan RequestInspector, QUEUE_SIZE)
 
-	setupWorker(3)
+	setupLogger()
+	setupWorkers(3)
 	distributionWork()
 
-	router.POST(TRACKING_NEW, newTrackingHandler)
+	router.POST(TRACKING_ADD, addTrackingHandler)
 	router.GET(TRACKING_STATUS, func(c *gin.Context){})
 	router.GET(TRACKING_RESULT, func(c *gin.Context){})
 
