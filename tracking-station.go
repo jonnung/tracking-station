@@ -3,21 +3,21 @@ package main
 import (
 	"github.com/gin-gonic/gin"
 	"sync"
-	"log"
 	"github.com/Sirupsen/logrus"
 	"os"
 	"fmt"
 )
 
 const (
-	TRACKING_ADD = "/job/new"
-	TRACKING_STATUS = "/job/status"
-	TRACKING_RESULT = "/job/result"
+	TRACKING_NEW = "/tracking/new"
+	TRACKING_STATUS = "/tracking/status"
+	TRACKING_RESULT = "/tracking/result"
 	WORKER_COUNT = 3
-	QUEUE_SIZE = 5
+	REQUEST_QUEUE_SIZE = 5
 )
 
 type RequestInspector struct {
+	trackingId int
 	Clients []TrackingClients `json:"clients" binding:"required"`
 }
 
@@ -36,6 +36,7 @@ var inspectQueue chan TrackingClients
 
 var logAccess *logrus.Logger
 var logError *logrus.Logger
+
 
 func setupWorkers(worker_count int) {
 	if worker_count < WORKER_COUNT {
@@ -68,13 +69,15 @@ func startSubWorker(part string, url string, wc *sync.WaitGroup) {
 }
 
 
-func distributionWork() {
+func acceptRequest() {
 	go func() {
-		rq := <-requestQueue
-		for _, cl := range rq.Clients {
-			// 클라이언트 정보 저장
-			// 요청 시간 저장
-			inspectQueue <- cl
+		for {
+			rq := <-requestQueue
+			for _, cl := range rq.Clients {
+				// 클라이언트 정보 저장
+				// 요청 시간 저장
+				inspectQueue <- cl
+			}
 		}
 	}()
 }
@@ -83,11 +86,20 @@ func distributionWork() {
 func addTrackingHandler(c *gin.Context) {
 	var rq RequestInspector
 	if err := c.BindJSON(&rq); err != nil {
-		log.Fatal(err)
+		logError.Error(err)
+		// 적절한 에러 응답을 줘야함
 	}
 
-	requestQueue <- rq
+	// 새로운 리퀘스트 ID를 부여한다
+	rq.trackingId = 1
+
+	// 워커에서 처리가 지연되면 다음 요청에 대한 응답을 주지 못하고 행이 걸릴 수 있음
+	// 익명함수를 goroutine 으로 실행 시키고, 응답은 즉시 처리할 수 있음
+	go func() {
+		requestQueue <- rq
+	}()
 }
+
 
 func LogMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -102,6 +114,7 @@ func LogMiddleware() gin.HandlerFunc {
 		logAccess.Info(output)
 	}
 }
+
 
 func setupLogger() {
 	logAccess = logrus.New()
@@ -125,18 +138,20 @@ func setupLogger() {
 	logError.Out, _ = os.OpenFile("log/tracking-station.error.log", os.O_RDWR | os.O_CREATE | os.O_APPEND, 0755)
 }
 
+
 func main() {
 	router := gin.New()
 
 	router.Use(LogMiddleware())
 
-	requestQueue = make(chan RequestInspector, QUEUE_SIZE)
+	requestQueue = make(chan RequestInspector, REQUEST_QUEUE_SIZE)
+	inspectQueue = make(chan TrackingClients)
 
 	setupLogger()
 	setupWorkers(3)
-	distributionWork()
+	acceptRequest()
 
-	router.POST(TRACKING_ADD, addTrackingHandler)
+	router.POST(TRACKING_NEW, addTrackingHandler)
 	router.GET(TRACKING_STATUS, func(c *gin.Context){})
 	router.GET(TRACKING_RESULT, func(c *gin.Context){})
 
