@@ -1,34 +1,42 @@
 package main
 
 import (
-	"github.com/gin-gonic/gin"
-	"sync"
-	"github.com/Sirupsen/logrus"
-	"os"
+	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"sync"
+
+	"github.com/PuerkitoBio/goquery"
+	"github.com/Sirupsen/logrus"
+	"github.com/gin-gonic/gin"
 )
 
 const (
-	TRACKING_NEW = "/tracking/new"
-	TRACKING_STATUS = "/tracking/status"
-	TRACKING_RESULT = "/tracking/result"
-	WORKER_COUNT = 3
+	TRACKING_NEW       = "/tracking/new"
+	TRACKING_STATUS    = "/tracking/status"
+	TRACKING_RESULT    = "/tracking/result"
+	WORKER_COUNT       = 3
 	REQUEST_QUEUE_SIZE = 5
+	PHANTOMJS          = "./phantomjs"
+	TRACKERJS          = "page_tracker.js"
 )
 
 type RequestInspector struct {
 	trackingId int
-	Clients []TrackingClients `json:"clients" binding:"required"`
+	Clients    []TrackingClients `json:"clients" binding:"required"`
 }
 
 type TrackingClients struct {
 	ClientId string `json:"id" binding:"required"`
-	Tags []Tag `json:"tags" binding:"required"`
+	Tags     []Tag  `json:"tags" binding:"required"`
 }
 
 type Tag struct {
-	Part string `json:"part" binding:"required"`
-	Url string `json:"url" binding:"required"`
+	Part   string `json:"part" binding:"required"`
+	Url    string `json:"url" binding:"required"`
+	status string
+	result string
 }
 
 var requestQueue chan RequestInspector
@@ -36,7 +44,6 @@ var inspectQueue chan TrackingClients
 
 var logAccess *logrus.Logger
 var logError *logrus.Logger
-
 
 func setupWorkers(worker_count int) {
 	if worker_count < WORKER_COUNT {
@@ -48,26 +55,56 @@ func setupWorkers(worker_count int) {
 	}
 }
 
-
 func startWorker() {
 	for {
 		var wc sync.WaitGroup
 
 		cl := <-inspectQueue
 
+		trackerQueue := make(chan Tag)
+
 		for _, tag := range cl.Tags {
 			wc.Add(1)
-			go startSubWorker(tag.Part, tag.Url, &wc)
+			go startSubWorker(tag, trackerQueue, &wc)
 		}
 		wc.Wait()
+		<-trackerQueue
+		close(trackerQueue)
 	}
 }
 
+func startSubWorker(tag Tag, tq chan Tag, wc *sync.WaitGroup) {
+	defer func() {
+		if r := recover(); r != nil {
+			err, _ := r.(error)
+			tag.status = "ERROR"
+			tag.result = err.Error()
+		}
+		tq <- tag
+		wc.Done()
+	}()
 
-func startSubWorker(part string, url string, wc *sync.WaitGroup) {
-	wc.Done()
+	cmd := exec.Command(PHANTOMJS, TRACKERJS, tag.Url)
+	stdout, _ := cmd.StdoutPipe()
+
+	if err := cmd.Start(); err != nil {
+		logError.Error(err)
+		panic(err)
+	}
+
+	doc, _ := goquery.NewDocumentFromReader(stdout)
+	doc.Find("div#wp_tg_cts iframe").Each(func(_ int, s *goquery.Selection) {
+		trackingResult, exist := s.Attr("src")
+		if exist == false {
+			err := errors.New("Noting traking request")
+			logError.Error(err)
+			panic(err)
+		}
+
+		tag.status = "SUCCESS"
+		tag.result = trackingResult
+	})
 }
-
 
 func acceptRequest() {
 	go func() {
@@ -81,7 +118,6 @@ func acceptRequest() {
 		}
 	}()
 }
-
 
 func addTrackingHandler(c *gin.Context) {
 	var rq RequestInspector
@@ -100,7 +136,6 @@ func addTrackingHandler(c *gin.Context) {
 	}()
 }
 
-
 func LogMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Next()
@@ -114,7 +149,6 @@ func LogMiddleware() gin.HandlerFunc {
 		logAccess.Info(output)
 	}
 }
-
 
 func setupLogger() {
 	logAccess = logrus.New()
@@ -134,15 +168,12 @@ func setupLogger() {
 	logAccess.Level = logrus.InfoLevel
 	logError.Level = logrus.ErrorLevel
 
-	logAccess.Out, _ = os.OpenFile("log/tracking-station.access.log", os.O_RDWR | os.O_CREATE | os.O_APPEND, 0755)
-	logError.Out, _ = os.OpenFile("log/tracking-station.error.log", os.O_RDWR | os.O_CREATE | os.O_APPEND, 0755)
+	logAccess.Out, _ = os.OpenFile("log/tracking-station.access.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0755)
+	logError.Out, _ = os.OpenFile("log/tracking-station.error.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0755)
 }
-
 
 func main() {
 	router := gin.New()
-
-	router.Use(LogMiddleware())
 
 	requestQueue = make(chan RequestInspector, REQUEST_QUEUE_SIZE)
 	inspectQueue = make(chan TrackingClients)
@@ -151,9 +182,11 @@ func main() {
 	setupWorkers(3)
 	acceptRequest()
 
+	router.Use(LogMiddleware())
+
 	router.POST(TRACKING_NEW, addTrackingHandler)
-	router.GET(TRACKING_STATUS, func(c *gin.Context){})
-	router.GET(TRACKING_RESULT, func(c *gin.Context){})
+	router.GET(TRACKING_STATUS, func(c *gin.Context) {})
+	router.GET(TRACKING_RESULT, func(c *gin.Context) {})
 
 	router.Run(":8585")
 }
