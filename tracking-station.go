@@ -7,40 +7,40 @@ import (
 	"os/exec"
 	"sync"
 
+	"net/http"
+
+	"github.com/HouzuoGuo/tiedot/db"
 	"github.com/PuerkitoBio/goquery"
 	"github.com/Sirupsen/logrus"
 	"github.com/gin-gonic/gin"
 )
 
 const (
-	TRACKING_NEW       = "/tracking/new"
-	TRACKING_STATUS    = "/tracking/status"
-	TRACKING_RESULT    = "/tracking/result"
-	WORKER_COUNT       = 3
-	REQUEST_QUEUE_SIZE = 5
-	PHANTOMJS          = "./phantomjs"
-	TRACKERJS          = "page_tracker.js"
+	WORKER_COUNT  = 3
+	DB_COLLECTION = "TrackingClients"
+	PHANTOMJS     = "./phantomjs"
+	TRACKERJS     = "page_tracker.js"
 )
 
-type RequestInspector struct {
-	trackingId int
-	Clients    []TrackingClients `json:"clients" binding:"required"`
+type TrackingRequest struct {
+	Clients []TrackingClients `json:"clients" binding:"required"`
 }
 
 type TrackingClients struct {
 	ClientId string `json:"id" binding:"required"`
 	Tags     []Tag  `json:"tags" binding:"required"`
+	docId    int
 }
 
 type Tag struct {
-	Part   string `json:"part" binding:"required"`
+	Device string `json:"device"`
+	Part   string `json:"part"`
 	Url    string `json:"url" binding:"required"`
-	status string
-	result string
+	result chan [2]interface{}
 }
 
-var requestQueue chan RequestInspector
-var inspectQueue chan TrackingClients
+var inspectChannel chan TrackingClients
+var tsdb *db.Col
 
 var logAccess *logrus.Logger
 var logError *logrus.Logger
@@ -51,36 +51,50 @@ func setupWorkers(worker_count int) {
 	}
 
 	for i := 0; i < worker_count; i++ {
-		go startWorker()
+		go mainWorker()
 	}
 }
 
-func startWorker() {
+func mainWorker() {
 	for {
 		var wc sync.WaitGroup
 
-		cl := <-inspectQueue
+		cl := <-inspectChannel
 
-		trackerQueue := make(chan Tag)
-
+		resultChannel := make(chan [2]interface{})
 		for _, tag := range cl.Tags {
+			tag.result = resultChannel
 			wc.Add(1)
-			go startSubWorker(tag, trackerQueue, &wc)
+			go subWorker(tag, &wc)
 		}
-		wc.Wait()
-		<-trackerQueue
-		close(trackerQueue)
+
+		go func() {
+			wc.Wait()
+			close(resultChannel)
+		}()
+
+		for result := range resultChannel {
+			if result[1].(bool) {
+
+			} else {
+
+			}
+
+			// 결과 저장
+			// client_id, device, part, url, status, result, latest_update_datetime
+		}
+
 	}
 }
 
-func startSubWorker(tag Tag, tq chan Tag, wc *sync.WaitGroup) {
+func subWorker(tag Tag, wc *sync.WaitGroup) {
 	defer func() {
 		if r := recover(); r != nil {
 			err, _ := r.(error)
-			tag.status = "ERROR"
-			tag.result = err.Error()
+			logError.Error(err)
+			tag.result <- [2]interface{}{err.Error(), false}
 		}
-		tq <- tag
+
 		wc.Done()
 	}()
 
@@ -88,52 +102,80 @@ func startSubWorker(tag Tag, tq chan Tag, wc *sync.WaitGroup) {
 	stdout, _ := cmd.StdoutPipe()
 
 	if err := cmd.Start(); err != nil {
-		logError.Error(err)
 		panic(err)
 	}
 
 	doc, _ := goquery.NewDocumentFromReader(stdout)
-	doc.Find("div#wp_tg_cts iframe").Each(func(_ int, s *goquery.Selection) {
-		trackingResult, exist := s.Attr("src")
-		if exist == false {
-			err := errors.New("Noting traking request")
-			logError.Error(err)
-			panic(err)
-		}
+	finder := doc.Find("div#wp_tg_cts iframe")
 
-		tag.status = "SUCCESS"
-		tag.result = trackingResult
-	})
+	if len(finder.Nodes) > 0 {
+		finder.Each(func(_ int, s *goquery.Selection) {
+			trackingResult, exist := s.Attr("src")
+			if exist == false {
+				err := errors.New("Not render tracking tag")
+				panic(err)
+			}
+
+			tag.result <- [2]interface{}{trackingResult, true}
+		})
+	} else {
+		err := errors.New("Nothing tracking tag")
+		panic(err)
+	}
 }
 
-func acceptRequest() {
-	go func() {
-		for {
-			rq := <-requestQueue
-			for _, cl := range rq.Clients {
-				// 클라이언트 정보 저장
-				// 요청 시간 저장
-				inspectQueue <- cl
-			}
+// Register new client information
+func setNewClientHandler(c *gin.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			err, _ := r.(error)
+			logError.Error(err)
+			c.JSON(http.StatusInternalServerError, gin.H{"message": "Can not create new client"})
 		}
 	}()
-}
 
-func addTrackingHandler(c *gin.Context) {
-	var rq RequestInspector
-	if err := c.BindJSON(&rq); err != nil {
-		logError.Error(err)
-		// 적절한 에러 응답을 줘야함
+	var cl struct {
+		client_id   int
+		client_name string
 	}
 
-	// 새로운 리퀘스트 ID를 부여한다
-	rq.trackingId = 1
+	// TODO: 이부분을 미들웨어에서 공통적으로 처리할 수 없을까?
+	if err := c.BindJSON(&cl); err != nil {
+		logError.Error(err)
+		c.JSON(http.StatusBadRequest, gin.H{"message": "Invalid request data format"})
+	}
 
-	// 워커에서 처리가 지연되면 다음 요청에 대한 응답을 주지 못하고 행이 걸릴 수 있음
-	// 익명함수를 goroutine 으로 실행 시키고, 응답은 즉시 처리할 수 있음
-	go func() {
-		requestQueue <- rq
-	}()
+	expr := map[string]interface{}{"in": []interface{}{"client_id"}, "limit": 1}
+	queryResult := make(map[int]struct{})
+	if err := db.Lookup(cl.client_id, expr, tsdb, &queryResult); err != nil {
+		panic(err)
+	}
+
+	if len(queryResult) > 0 {
+		c.JSON(http.StatusConflict, gin.H{"message": "Duplicated client"})
+	}
+
+	_, err := tsdb.Insert(map[string]interface{}{"client_id": cl.client_id, "client_name": cl.client_name})
+	if err != nil {
+		panic(err)
+	}
+}
+
+func setTrackingHandler(c *gin.Context) {
+	var rq TrackingRequest
+	if err := c.BindJSON(&rq); err != nil {
+		logError.Error(err)
+		c.JSON(http.StatusBadRequest, gin.H{"message": "Invalid request data format"})
+	}
+
+	for _, cl := range rq.Clients {
+		// DB에 존재하는 클라이언트 인지 확인, 없으면 에러로 판단
+		// 실행중인 클라이언트 인지 확인
+		// latest_start_datetime 갱신
+		go func() {
+			inspectChannel <- cl
+		}()
+	}
 }
 
 func LogMiddleware() gin.HandlerFunc {
@@ -172,21 +214,50 @@ func setupLogger() {
 	logError.Out, _ = os.OpenFile("log/tracking-station.error.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0755)
 }
 
+func setupDatabase() {
+	odb, err := db.OpenDB("tsdb")
+	if err != nil {
+		panic(err)
+	}
+
+	existCollection := (func(cols []string) bool {
+		for _, col := range cols {
+			if col == DB_COLLECTION {
+				return true
+			}
+		}
+		return false
+	})(odb.AllCols())
+
+	if existCollection == false {
+		if err := odb.Create(DB_COLLECTION); err != nil {
+			panic(err)
+		}
+	}
+
+	tsdb = odb.Use(DB_COLLECTION)
+
+	// Create index
+	tsdb.Index([]string{"client_id"})
+}
+
 func main() {
 	router := gin.New()
 
-	requestQueue = make(chan RequestInspector, REQUEST_QUEUE_SIZE)
-	inspectQueue = make(chan TrackingClients)
+	inspectChannel = make(chan TrackingClients)
 
 	setupLogger()
+	setupDatabase()
 	setupWorkers(3)
-	acceptRequest()
 
 	router.Use(LogMiddleware())
 
-	router.POST(TRACKING_NEW, addTrackingHandler)
-	router.GET(TRACKING_STATUS, func(c *gin.Context) {})
-	router.GET(TRACKING_RESULT, func(c *gin.Context) {})
+	router.GET("/clients", func(c *gin.Context) {})
+	router.GET("/clients/:client_id", func(c *gin.Context) {})
+	router.POST("/clients", setNewClientHandler)
+
+	router.GET("/tracking/:client_id", func(c *gin.Context) {})
+	router.POST("/tracking", setTrackingHandler)
 
 	router.Run(":8585")
 }
