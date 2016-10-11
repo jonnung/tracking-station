@@ -1,0 +1,43 @@
+package main
+
+import (
+	"fmt"
+
+	"github.com/gin-gonic/gin"
+
+	ts "github.com/jonnung/tracking_station/tracking_station"
+)
+
+func LogMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Next()
+		output := fmt.Sprintf("%s %s %s %s %s",
+			c.Request.Method,
+			c.Request.URL.Path,
+			c.ClientIP(),
+			c.ContentType(),
+			c.Request.Header.Get("User-Agenct"),
+		)
+		ts.LogAccess.Info(output)
+	}
+}
+
+func main() {
+	router := gin.New()
+
+	ts.SetupLogger()
+	ts.SetupDatabase()
+	ts.SetupWorkers(3)
+
+	router.Use(LogMiddleware())
+
+	router.GET("/clients", ts.ClientsHandler)
+	router.GET("/clients/:client_id", ts.ClientOneHandler)
+	router.POST("/clients/:client_id/tags", ts.SetClientTagsHandler)
+	router.POST("/clients", ts.SetClientHandler)
+
+	router.GET("/tracking/:client_id", ts.TrackingClientHandler)
+	router.POST("/tracking", ts.SetTrackingHandler)
+
+	router.Run(":8585")
+}
