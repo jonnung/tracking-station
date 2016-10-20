@@ -20,13 +20,15 @@ type TrackingRequest struct {
 
 type TrackingClients struct {
 	ClientId string `json:"id" binding:"required"`
-	Tags     []Tag  `json:"tags" binding:"required"`
+	Tags     `json:"tags" binding:"required"`
 	docId    int
 }
 
+type Tags []Tag
+
 type Tag struct {
-	Device string `json:"device"`
-	Part   string `json:"part"`
+	Device string `json:"device" binding:"required"`
+	Part   string `json:"part" binding:"required"`
 	Url    string `json:"url" binding:"required"`
 	result chan [2]interface{}
 }
