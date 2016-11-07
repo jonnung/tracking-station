@@ -7,6 +7,8 @@ import (
 
 	"strconv"
 
+	"net/http"
+
 	ts "github.com/jonnung/tracking_station/tracking_station"
 )
 
@@ -30,9 +32,12 @@ func ResourceMiddleware() gin.HandlerFunc {
 		var noParamErr error
 
 		if clientId, noParamErr = strconv.Atoi(c.Param("client_id")); noParamErr != nil {
-			if existClient := ts.LookupClient(clientId); len(existClient) > 0 {
+		} else {
+			if clientDocId, err := ts.LookupClient(clientId); err != nil {
+				c.JSON(http.StatusNotFound, gin.H{"message": fmt.Sprint(err)})
+			} else {
 				c.Set("clientId", clientId)
-				c.Set("clientDocIds", existClient)
+				c.Set("clientDocId", clientDocId)
 			}
 		}
 

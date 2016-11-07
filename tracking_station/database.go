@@ -35,9 +35,12 @@ func SetupDatabase() {
 		// Create indexes
 		if col == "clients" {
 			useCol.Index([]string{"client_id"})
+			useCol.Index([]string{"client_id", "tags, part"})
+			useCol.Index([]string{"client_id", "tags, device"})
+			useCol.Index([]string{"client_id", "tags, url"})
 		} else if col == "tracking" {
 			useCol.Index([]string{"client_id"})
-			useCol.Index([]string{"client_id", "status"})
+			useCol.Index([]string{"status"})
 			useCol.Index([]string{"start_unixminute"})
 			useCol.Index([]string{"end_unixminiute"})
 		}

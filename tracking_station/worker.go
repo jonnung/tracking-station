@@ -19,7 +19,7 @@ type TrackingRequest struct {
 }
 
 type TrackingClients struct {
-	ClientId string `json:"id" binding:"required"`
+	ClientId int `json:"client_id" binding:"required"`
 	Tags     `json:"tags" binding:"required"`
 	docId    int
 }
@@ -30,6 +30,7 @@ type Tag struct {
 	Device string `json:"device" binding:"required"`
 	Part   string `json:"part" binding:"required"`
 	Url    string `json:"url" binding:"required"`
+	Detail string `json:"detail"`
 	result chan [2]interface{}
 }
 
@@ -66,6 +67,7 @@ func mainWorker() {
 		}()
 
 		for result := range resultChannel {
+			// for i := range c는 채널 c가 닫힐 때까지 반복하며 채널로부터 수신을 시도
 			if result[1].(bool) {
 
 			} else {
